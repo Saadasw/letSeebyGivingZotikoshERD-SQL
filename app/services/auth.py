@@ -296,3 +296,155 @@ class AuthService:
             await self.db.commit()
 
         return result
+
+    async def complete_patient_registration(
+        self,
+        email: str,
+        password: str,
+        first_name: str,
+        last_name: str,
+        phone: Optional[str] = None,
+        date_of_birth: Optional[datetime] = None,
+        gender: Optional[str] = None,
+        blood_group: Optional[str] = None,
+        address: Optional[str] = None,
+        city: Optional[str] = None,
+        state: Optional[str] = None,
+        postal_code: Optional[str] = None,
+        emergency_contact_name: Optional[str] = None,
+        emergency_contact_phone: Optional[str] = None,
+        emergency_contact_relation: Optional[str] = None,
+        ip_address: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ) -> Tuple[User, str, str]:
+        """
+        Complete patient registration after OTP verification.
+
+        This method:
+        1. Creates user if not exists, or updates existing user
+        2. Sets the password
+        3. Creates patient profile
+        4. Marks email as verified and profile as completed
+        5. Creates session and returns tokens
+
+        Returns:
+            Tuple of (user, access_token, refresh_token)
+        """
+        from sqlalchemy import select
+
+        # Check if user exists
+        existing_user = await self.user_repo.get_by_email(email)
+
+        if existing_user:
+            # User exists - check if they already have completed profile
+            if existing_user.profile_completed and existing_user.password:
+                raise ConflictError("Account already exists and is complete. Please log in.")
+
+            # Update existing user with password and profile completion
+            user = existing_user
+            user.password = get_password_hash(password)
+            user.name = f"{first_name} {last_name}"
+            user.phone = phone
+            user.email_verified_at = datetime.utcnow()
+            user.profile_completed = True
+            user.profile_completed_at = datetime.utcnow()
+
+        else:
+            # Create new user
+            user = User(
+                email=email.lower(),
+                password=get_password_hash(password),
+                name=f"{first_name} {last_name}",
+                phone=phone,
+                role=UserRole.PATIENT,
+                is_active=True,
+                email_verified_at=datetime.utcnow(),
+                profile_completed=True,
+                profile_completed_at=datetime.utcnow(),
+            )
+            self.db.add(user)
+            await self.db.flush()
+
+        # Create or update patient profile
+        from app.db.models.patient import PatientProfile
+
+        patient_query = select(PatientProfile).where(PatientProfile.user_id == user.id)
+        result = await self.db.execute(patient_query)
+        patient = result.scalar_one_or_none()
+
+        if patient:
+            # Update existing profile
+            patient.first_name = first_name
+            patient.last_name = last_name
+            if date_of_birth:
+                patient.date_of_birth = date_of_birth
+            if gender:
+                patient.gender = gender
+            if blood_group:
+                patient.blood_group = blood_group
+            if address:
+                patient.address = address
+            if city:
+                patient.city = city
+            if state:
+                patient.state = state
+            if postal_code:
+                patient.postal_code = postal_code
+            if emergency_contact_name:
+                patient.emergency_contact_name = emergency_contact_name
+            if emergency_contact_phone:
+                patient.emergency_contact_phone = emergency_contact_phone
+            if emergency_contact_relation:
+                patient.emergency_contact_relationship = emergency_contact_relation
+        else:
+            # Create new patient profile
+            patient = PatientProfile(
+                user_id=user.id,
+                first_name=first_name,
+                last_name=last_name,
+                date_of_birth=date_of_birth,
+                gender=gender,
+                blood_group=blood_group,
+                address=address,
+                city=city,
+                state=state,
+                postal_code=postal_code,
+                emergency_contact_name=emergency_contact_name,
+                emergency_contact_phone=emergency_contact_phone,
+                emergency_contact_relationship=emergency_contact_relation,
+            )
+            self.db.add(patient)
+
+        await self.db.flush()
+
+        # Create tokens
+        access_token = create_access_token(
+            subject=str(user.id),
+            additional_claims={
+                "role": user.role.value,
+            },
+        )
+
+        refresh_token = create_refresh_token(subject=str(user.id))
+
+        # Create session
+        from app.db.models.user import UserSession
+
+        expires_at = datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+
+        session = UserSession(
+            user_id=user.id,
+            refresh_token_hash=refresh_token,  # In production, hash this
+            device_info=user_agent,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            is_active=True,
+            expires_at=expires_at,
+            last_activity_at=datetime.utcnow(),
+        )
+        self.db.add(session)
+
+        await self.db.commit()
+        await self.db.refresh(user)
+
+        return user, access_token, refresh_token

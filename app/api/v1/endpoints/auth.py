@@ -394,3 +394,283 @@ async def revoke_session(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid session ID",
         )
+
+
+# ==========================================
+# OTP-BASED REGISTRATION FLOW
+# ==========================================
+
+from app.api.v1.schemas.auth import (
+    SendOTPRequest,
+    SendOTPResponse,
+    VerifyOTPRequest,
+    VerifyOTPResponse,
+    CompleteProfileRequest,
+    CompleteProfileResponse,
+    ProfileStatusResponse,
+)
+from app.services.otp import OTPService
+
+
+@router.post("/otp/send", response_model=SendOTPResponse)
+async def send_otp(
+    otp_request: SendOTPRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Send OTP to email for patient registration.
+
+    Step 1 of registration flow:
+    1. Patient enters email
+    2. System sends OTP to email
+    3. Patient verifies OTP
+    4. Patient completes profile with password
+
+    Rate limited to 1 OTP per 60 seconds per email.
+    """
+    otp_service = OTPService(db)
+
+    success, message = await otp_service.send_otp(
+        email=otp_request.email,
+        purpose="email_verification",
+    )
+
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=message,
+        )
+
+    return SendOTPResponse(
+        success=True,
+        message=message,
+        email=otp_request.email,
+        expires_in_minutes=10,
+    )
+
+
+@router.post("/otp/verify", response_model=VerifyOTPResponse)
+async def verify_otp(
+    verify_request: VerifyOTPRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Verify OTP code sent to email.
+
+    Step 2 of registration flow.
+    Returns a verification token to be used for completing profile setup.
+
+    Max 3 attempts per OTP. After that, request a new one.
+    """
+    from app.core.security import create_verification_token
+
+    otp_service = OTPService(db)
+
+    success, message = await otp_service.verify_otp(
+        email=verify_request.email,
+        otp_code=verify_request.otp,
+        purpose="email_verification",
+    )
+
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=message,
+        )
+
+    # Generate a short-lived verification token for profile completion
+    verification_token = create_verification_token(
+        email=verify_request.email,
+        purpose="profile_setup",
+        expires_minutes=30,
+    )
+
+    return VerifyOTPResponse(
+        success=True,
+        message=message,
+        email=verify_request.email,
+        verification_token=verification_token,
+    )
+
+
+@router.post("/otp/resend", response_model=SendOTPResponse)
+async def resend_otp(
+    otp_request: SendOTPRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Resend OTP to email.
+
+    Rate limited to 1 OTP per 60 seconds per email.
+    """
+    otp_service = OTPService(db)
+
+    success, message = await otp_service.send_otp(
+        email=otp_request.email,
+        purpose="email_verification",
+    )
+
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=message,
+        )
+
+    return SendOTPResponse(
+        success=True,
+        message=message,
+        email=otp_request.email,
+        expires_in_minutes=10,
+    )
+
+
+@router.post("/complete-profile", response_model=CompleteProfileResponse)
+async def complete_profile(
+    request: Request,
+    profile_data: CompleteProfileRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Complete patient profile after OTP verification.
+
+    Step 3 (final) of registration flow:
+    - Sets password
+    - Creates patient profile
+    - Returns access and refresh tokens
+
+    Requires valid verification token from OTP verification step.
+    """
+    from app.core.security import verify_verification_token, get_password_hash
+    from datetime import datetime
+
+    # Verify the verification token
+    try:
+        token_data = verify_verification_token(
+            token=profile_data.verification_token,
+            expected_purpose="profile_setup",
+        )
+        if token_data.get("email", "").lower() != profile_data.email.lower():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Token email mismatch",
+            )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired verification token. Please verify your email again.",
+        )
+
+    # Validate passwords match
+    if profile_data.password != profile_data.confirm_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Passwords do not match",
+        )
+
+    auth_service = AuthService(db)
+    client_ip, user_agent = get_client_info(request)
+
+    try:
+        # Create or update user with profile
+        user, access_token, refresh_token = await auth_service.complete_patient_registration(
+            email=profile_data.email,
+            password=profile_data.password,
+            first_name=profile_data.first_name,
+            last_name=profile_data.last_name,
+            phone=profile_data.phone,
+            date_of_birth=profile_data.date_of_birth,
+            gender=profile_data.gender,
+            blood_group=profile_data.blood_group,
+            address=profile_data.address,
+            city=profile_data.city,
+            state=profile_data.state,
+            postal_code=profile_data.postal_code,
+            emergency_contact_name=profile_data.emergency_contact_name,
+            emergency_contact_phone=profile_data.emergency_contact_phone,
+            emergency_contact_relation=profile_data.emergency_contact_relation,
+            ip_address=client_ip,
+            user_agent=user_agent,
+        )
+
+        from app.api.v1.schemas.auth import CurrentUserResponse
+        from app.config import settings
+
+        return CompleteProfileResponse(
+            success=True,
+            message="Profile completed successfully. Welcome!",
+            user=CurrentUserResponse(
+                id=user.id,
+                email=user.email,
+                first_name=profile_data.first_name,
+                last_name=profile_data.last_name,
+                role=user.role,
+                is_active=user.is_active,
+                is_verified=True,
+                created_at=user.created_at,
+            ),
+            access_token=access_token,
+            refresh_token=refresh_token,
+            token_type="bearer",
+            expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        )
+    except ValidationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
+@router.get("/profile-status/{email}", response_model=ProfileStatusResponse)
+async def check_profile_status(
+    email: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Check if a user's profile setup is complete.
+
+    Returns profile status:
+    - email_verified: Whether email has been verified via OTP
+    - profile_completed: Whether profile setup (including password) is complete
+    - needs_password_setup: Whether user needs to set up password
+
+    Used by frontend to show appropriate alerts/prompts.
+    """
+    from sqlalchemy import select
+    from app.db.models.user import User
+
+    # Find user by email
+    result = await db.execute(
+        select(User).where(User.email == email.lower())
+    )
+    user = result.scalar_one_or_none()
+
+    if not user:
+        # User doesn't exist yet - needs to start OTP flow
+        return ProfileStatusResponse(
+            email=email,
+            email_verified=False,
+            profile_completed=False,
+            needs_password_setup=True,
+            message="Please verify your email first by requesting an OTP.",
+        )
+
+    email_verified = user.email_verified_at is not None
+    profile_completed = user.profile_completed
+    needs_password = user.password is None
+
+    if not email_verified:
+        message = "Please verify your email first by requesting an OTP."
+    elif needs_password:
+        message = "Please set up your password to complete registration."
+    elif not profile_completed:
+        message = "Please complete your profile setup."
+    else:
+        message = "Profile setup is complete. You can log in."
+
+    return ProfileStatusResponse(
+        email=email,
+        email_verified=email_verified,
+        profile_completed=profile_completed,
+        needs_password_setup=needs_password,
+        message=message,
+    )

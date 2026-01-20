@@ -195,3 +195,64 @@ def verify_refresh_token_hash(token: str, hashed_token: str) -> bool:
         True if matches, False otherwise
     """
     return pwd_context.verify(token, hashed_token)
+
+
+def create_verification_token(
+    email: str,
+    purpose: str,
+    expires_minutes: int = 30,
+) -> str:
+    """
+    Create a verification token for email verification or profile setup.
+
+    Args:
+        email: The email address
+        purpose: The purpose (e.g., "profile_setup", "email_verification")
+        expires_minutes: Token expiration time in minutes
+
+    Returns:
+        Encoded JWT token string
+    """
+    expire = datetime.utcnow() + timedelta(minutes=expires_minutes)
+
+    to_encode = {
+        "email": email.lower(),
+        "purpose": purpose,
+        "exp": expire,
+        "iat": datetime.utcnow(),
+        "type": "verification",
+    }
+
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def verify_verification_token(
+    token: str,
+    expected_purpose: str,
+) -> dict[str, Any]:
+    """
+    Verify a verification token.
+
+    Args:
+        token: The verification token
+        expected_purpose: The expected purpose
+
+    Returns:
+        Token payload if valid
+
+    Raises:
+        ValueError: If token is invalid or purpose doesn't match
+    """
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+
+        if payload.get("type") != "verification":
+            raise ValueError("Invalid token type")
+
+        if payload.get("purpose") != expected_purpose:
+            raise ValueError("Invalid token purpose")
+
+        return payload
+
+    except JWTError as e:
+        raise ValueError(f"Invalid token: {str(e)}")

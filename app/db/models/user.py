@@ -36,6 +36,10 @@ class User(Base, UUIDMixin, TimestampMixin):
     email_verified_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    profile_completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    profile_completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Relationships
@@ -74,6 +78,16 @@ class User(Base, UUIDMixin, TimestampMixin):
     def is_patient(self) -> bool:
         """Check if user is patient."""
         return self.role == UserRole.PATIENT
+
+    @property
+    def is_email_verified(self) -> bool:
+        """Check if email is verified."""
+        return self.email_verified_at is not None
+
+    @property
+    def needs_profile_setup(self) -> bool:
+        """Check if user needs to complete profile setup (set password)."""
+        return not self.profile_completed or self.password is None
 
     def __repr__(self) -> str:
         return f"<User {self.email} ({self.role.value})>"

@@ -167,3 +167,84 @@ class ResendVerificationRequest(BaseSchema):
     """Resend verification email request."""
 
     email: EmailStr
+
+
+# ==========================================
+# OTP VERIFICATION (Email-based Registration)
+# ==========================================
+
+
+class SendOTPRequest(BaseSchema):
+    """Send OTP request schema."""
+
+    email: EmailStr
+
+
+class SendOTPResponse(BaseSchema):
+    """Send OTP response schema."""
+
+    success: bool
+    message: str
+    email: str
+    expires_in_minutes: int = 10
+
+
+class VerifyOTPRequest(BaseSchema):
+    """Verify OTP request schema."""
+
+    email: EmailStr
+    otp: str = Field(..., min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+
+class VerifyOTPResponse(BaseSchema):
+    """Verify OTP response schema."""
+
+    success: bool
+    message: str
+    email: str
+    verification_token: Optional[str] = None  # Temporary token for profile setup
+
+
+class CompleteProfileRequest(BaseSchema):
+    """Complete profile setup after OTP verification."""
+
+    email: EmailStr
+    verification_token: str  # Token from OTP verification
+    password: str = Field(..., min_length=8, max_length=128)
+    confirm_password: str = Field(..., min_length=8, max_length=128)
+    first_name: str = Field(..., min_length=1, max_length=100)
+    last_name: str = Field(..., min_length=1, max_length=100)
+    phone: Optional[str] = Field(None, max_length=20)
+    # Patient-specific fields
+    date_of_birth: Optional[datetime] = None
+    gender: Optional[str] = None
+    blood_group: Optional[str] = None
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    postal_code: Optional[str] = None
+    emergency_contact_name: Optional[str] = None
+    emergency_contact_phone: Optional[str] = None
+    emergency_contact_relation: Optional[str] = None
+
+
+class CompleteProfileResponse(BaseSchema):
+    """Complete profile response schema."""
+
+    success: bool
+    message: str
+    user: "CurrentUserResponse"
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int
+
+
+class ProfileStatusResponse(BaseSchema):
+    """User profile status response."""
+
+    email: str
+    email_verified: bool
+    profile_completed: bool
+    needs_password_setup: bool
+    message: str
